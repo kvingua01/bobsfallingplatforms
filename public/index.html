@@ -1,1 +1,760 @@
 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  >
+
+  <title>Bob's Falling Platforms</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      min-height: 100%;
+      background: #10131a;
+      color: white;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    #topbar {
+      width: 100%;
+      max-width: 1100px;
+      padding: 12px 18px;
+
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 15px;
+    }
+
+    #title {
+      font-size: 22px;
+      font-weight: bold;
+    }
+
+    #status {
+      font-size: 16px;
+      color: #d7d7d7;
+    }
+
+    #gameWrap {
+      width: min(100%, 1100px);
+
+      display: flex;
+      justify-content: center;
+
+      padding: 0 10px 15px;
+    }
+
+    canvas {
+      width: 100%;
+      height: auto;
+
+      max-width: 1000px;
+
+      background: #172131;
+
+      border: 3px solid #444;
+      border-radius: 8px;
+
+      display: block;
+    }
+
+    #instructions {
+      width: 100%;
+      max-width: 1000px;
+
+      padding: 0 15px 20px;
+
+      color: #bbb;
+
+      text-align: center;
+
+      font-size: 14px;
+    }
+
+    #message {
+      position: fixed;
+
+      left: 50%;
+      top: 22%;
+
+      transform: translateX(-50%);
+
+      background: rgba(0, 0, 0, 0.82);
+
+      padding: 18px 28px;
+
+      border-radius: 12px;
+
+      font-size: 30px;
+      font-weight: bold;
+
+      text-align: center;
+
+      display: none;
+
+      z-index: 10;
+
+      pointer-events: none;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div id="topbar">
+
+    <div id="title">
+      Bob's Falling Platforms
+    </div>
+
+    <div id="status">
+      Connecting...
+    </div>
+
+  </div>
+
+  <div id="gameWrap">
+
+    <canvas
+      id="game"
+      width="1000"
+      height="760"
+    ></canvas>
+
+  </div>
+
+  <div id="instructions">
+
+    WASD / Arrow Keys = Move
+
+    &nbsp; • &nbsp;
+
+    W / Up / Space = Jump
+
+    &nbsp; • &nbsp;
+
+    Tiles break after 3 touches
+
+  </div>
+
+  <div id="message"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+
+  <script>
+
+    const socket = io();
+
+    const canvas =
+      document.getElementById("game");
+
+    const ctx =
+      canvas.getContext("2d");
+
+    const statusElement =
+      document.getElementById("status");
+
+    const messageElement =
+      document.getElementById("message");
+
+    let myId = null;
+
+    let players = {};
+    let tiles = [];
+
+    let roundNumber = 1;
+
+    const keys = {
+      left: false,
+      right: false,
+      jump: false
+    };
+
+    let jumpWasSent = false;
+
+    // =============================
+    // SOCKET
+    // =============================
+
+    socket.on("connect", () => {
+
+      statusElement.textContent =
+        "Connected";
+
+    });
+
+    socket.on("disconnect", () => {
+
+      statusElement.textContent =
+        "Disconnected";
+
+    });
+
+    socket.on("init", (data) => {
+
+      myId = data.id;
+
+      roundNumber =
+        data.roundNumber;
+
+    });
+
+    socket.on("state", (state) => {
+
+      players = state.players;
+
+      tiles = state.tiles;
+
+      roundNumber =
+        state.roundNumber;
+
+      updateStatus();
+
+    });
+
+    socket.on("roundOver", (data) => {
+
+      if (data.winnerId === myId) {
+
+        showMessage("YOU WIN!");
+
+      }
+      else if (data.winnerId) {
+
+        showMessage("ROUND OVER");
+
+      }
+      else {
+
+        showMessage("YOU FELL!");
+
+      }
+
+    });
+
+    socket.on("newRound", (data) => {
+
+      roundNumber =
+        data.roundNumber;
+
+      hideMessage();
+
+    });
+
+    // =============================
+    // CONTROLS
+    // =============================
+
+    window.addEventListener(
+      "keydown",
+      (event) => {
+
+        const key =
+          event.key.toLowerCase();
+
+        if (
+          key === "a" ||
+          event.key === "ArrowLeft"
+        ) {
+
+          keys.left = true;
+
+          event.preventDefault();
+
+        }
+
+        if (
+          key === "d" ||
+          event.key === "ArrowRight"
+        ) {
+
+          keys.right = true;
+
+          event.preventDefault();
+
+        }
+
+        if (
+          key === "w" ||
+          event.key === "ArrowUp" ||
+          event.code === "Space"
+        ) {
+
+          keys.jump = true;
+
+          event.preventDefault();
+
+        }
+
+      }
+    );
+
+    window.addEventListener(
+      "keyup",
+      (event) => {
+
+        const key =
+          event.key.toLowerCase();
+
+        if (
+          key === "a" ||
+          event.key === "ArrowLeft"
+        ) {
+
+          keys.left = false;
+
+        }
+
+        if (
+          key === "d" ||
+          event.key === "ArrowRight"
+        ) {
+
+          keys.right = false;
+
+        }
+
+        if (
+          key === "w" ||
+          event.key === "ArrowUp" ||
+          event.code === "Space"
+        ) {
+
+          keys.jump = false;
+
+          jumpWasSent = false;
+
+        }
+
+      }
+    );
+
+    // =============================
+    // SEND CONTROLS
+    // =============================
+
+    setInterval(() => {
+
+      let jump = false;
+
+      if (
+        keys.jump &&
+        !jumpWasSent
+      ) {
+
+        jump = true;
+
+        jumpWasSent = true;
+
+      }
+
+      socket.emit(
+        "input",
+        {
+          left: keys.left,
+          right: keys.right,
+          jump
+        }
+      );
+
+    }, 1000 / 30);
+
+    // =============================
+    // STATUS
+    // =============================
+
+    function updateStatus() {
+
+      const playerCount =
+        Object.keys(players).length;
+
+      statusElement.textContent =
+        `Round ${roundNumber} • Players: ${playerCount}`;
+
+    }
+
+    // =============================
+    // MESSAGES
+    // =============================
+
+    function showMessage(text) {
+
+      messageElement.textContent =
+        text;
+
+      messageElement.style.display =
+        "block";
+
+    }
+
+    function hideMessage() {
+
+      messageElement.style.display =
+        "none";
+
+    }
+
+    // =============================
+    // TILE COLOR
+    // =============================
+
+    function getTileColor(tile) {
+
+      if (tile.damage === 0) {
+
+        return "#41b883";
+
+      }
+
+      if (tile.damage === 1) {
+
+        return "#f1c40f";
+
+      }
+
+      if (tile.damage === 2) {
+
+        return "#e67e22";
+
+      }
+
+      return "#e74c3c";
+
+    }
+
+    // =============================
+    // BACKGROUND
+    // =============================
+
+    function drawBackground() {
+
+      const gradient =
+        ctx.createLinearGradient(
+          0,
+          0,
+          0,
+          canvas.height
+        );
+
+      gradient.addColorStop(
+        0,
+        "#24344d"
+      );
+
+      gradient.addColorStop(
+        1,
+        "#10141d"
+      );
+
+      ctx.fillStyle = gradient;
+
+      ctx.fillRect(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+      );
+
+    }
+
+    // =============================
+    // TILE
+    // =============================
+
+    function drawTile(tile) {
+
+      if (tile.broken) {
+        return;
+      }
+
+      ctx.fillStyle =
+        getTileColor(tile);
+
+      ctx.fillRect(
+        tile.x + 1,
+        tile.y,
+        tile.width - 2,
+        tile.height
+      );
+
+      ctx.fillStyle =
+        "rgba(255,255,255,0.18)";
+
+      ctx.fillRect(
+        tile.x + 2,
+        tile.y + 2,
+        tile.width - 4,
+        4
+      );
+
+      ctx.strokeStyle =
+        "rgba(0,0,0,0.35)";
+
+      ctx.lineWidth = 1;
+
+      ctx.strokeRect(
+        tile.x + 1,
+        tile.y,
+        tile.width - 2,
+        tile.height
+      );
+
+      if (tile.damage >= 2) {
+
+        ctx.strokeStyle =
+          "rgba(0,0,0,0.7)";
+
+        ctx.lineWidth = 2;
+
+        ctx.beginPath();
+
+        ctx.moveTo(
+          tile.x + 10,
+          tile.y + 2
+        );
+
+        ctx.lineTo(
+          tile.x + 18,
+          tile.y + 10
+        );
+
+        ctx.lineTo(
+          tile.x + 13,
+          tile.y + 18
+        );
+
+        ctx.stroke();
+
+      }
+
+    }
+
+    // =============================
+    // PLAYER
+    // =============================
+
+    function drawPlayer(player) {
+
+      if (!player.alive) {
+        return;
+      }
+
+      ctx.fillStyle =
+        player.color;
+
+      ctx.fillRect(
+        player.x,
+        player.y,
+        player.width,
+        player.height
+      );
+
+      // Eyes
+
+      const eyeY =
+        player.y + 10;
+
+      ctx.fillStyle =
+        "white";
+
+      ctx.fillRect(
+        player.x + 5,
+        eyeY,
+        7,
+        8
+      );
+
+      ctx.fillRect(
+        player.x + 17,
+        eyeY,
+        7,
+        8
+      );
+
+      // Pupils
+
+      ctx.fillStyle =
+        "#111";
+
+      ctx.fillRect(
+        player.x + 8,
+        eyeY + 3,
+        3,
+        4
+      );
+
+      ctx.fillRect(
+        player.x + 20,
+        eyeY + 3,
+        3,
+        4
+      );
+
+      // Outline
+
+      ctx.strokeStyle =
+        "#111";
+
+      ctx.lineWidth = 2;
+
+      ctx.strokeRect(
+        player.x,
+        player.y,
+        player.width,
+        player.height
+      );
+
+      // YOU label
+
+      if (player.id === myId) {
+
+        ctx.fillStyle =
+          "white";
+
+        ctx.font =
+          "bold 13px Arial";
+
+        ctx.textAlign =
+          "center";
+
+        ctx.fillText(
+          "YOU",
+          player.x +
+            player.width / 2,
+          player.y - 8
+        );
+
+      }
+
+    }
+
+    // =============================
+    // LAYER LABELS
+    // =============================
+
+    function drawLayerLabels() {
+
+      const layers = [
+
+        {
+          y: 220,
+          text: "LAYER 1"
+        },
+
+        {
+          y: 430,
+          text: "LAYER 2"
+        },
+
+        {
+          y: 640,
+          text: "FINAL LAYER"
+        }
+
+      ];
+
+      ctx.font =
+        "bold 15px Arial";
+
+      ctx.textAlign =
+        "right";
+
+      for (
+        const layer of layers
+      ) {
+
+        ctx.fillStyle =
+          "rgba(255,255,255,0.5)";
+
+        ctx.fillText(
+          layer.text,
+          92,
+          layer.y + 17
+        );
+
+      }
+
+    }
+
+    // =============================
+    // DRAW GAME
+    // =============================
+
+    function draw() {
+
+      drawBackground();
+
+      drawLayerLabels();
+
+      for (
+        const tile of tiles
+      ) {
+
+        drawTile(tile);
+
+      }
+
+      for (
+        const id in players
+      ) {
+
+        drawPlayer(
+          players[id]
+        );
+
+      }
+
+      ctx.fillStyle =
+        "rgba(231,76,60,0.18)";
+
+      ctx.fillRect(
+        0,
+        720,
+        canvas.width,
+        40
+      );
+
+      ctx.fillStyle =
+        "rgba(255,255,255,0.55)";
+
+      ctx.font =
+        "bold 13px Arial";
+
+      ctx.textAlign =
+        "center";
+
+      ctx.fillText(
+        "FALL BELOW THE FINAL PLATFORM = OUT",
+        canvas.width / 2,
+        747
+      );
+
+      requestAnimationFrame(draw);
+
+    }
+
+    draw();
+
+  </script>
+
+</body>
+</html>
