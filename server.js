@@ -1,7 +1,8 @@
+
 const express = require("express");
 const http = require("http");
-const { Server } = require("socket.io");
 const path = require("path");
+const { Server } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
@@ -11,417 +12,319 @@ app.use(express.static(path.join(__dirname, "public")));
 
 const PORT = process.env.PORT || 3000;
 
-// =========================
-// GAME SETTINGS
-// =========================
+const WIDTH = 1000;
+const HEIGHT = 760;
+const TILE = 40;
+const COLS = 20;
+const START_X = 100;
+const LEVELS = [220, 430, 640];
 
-const WORLD_WIDTH = 1000;
-const WORLD_HEIGHT = 760;
-
-const TILE_SIZE = 40;
-const TILES_ACROSS = 20;
-
-const PLATFORM_X = 100;
-const PLATFORM_WIDTH = TILE_SIZE * TILES_ACROSS;
-const PLATFORM_HEIGHT = 24;
-
-const LAYERS = [
-  { y: 220 },
-  { y: 430 },
-  { y: 640 }
-];
-
-const PLAYER_WIDTH = 28;
-const PLAYER_HEIGHT = 38;
-
-const MOVE_SPEED = 260;
-const JUMP_SPEED = 510;
+const PW = 28;
+const PH = 38;
+const SPEED = 260;
+const JUMP = 510;
 const GRAVITY = 1450;
 
-const TILE_BREAK_DELAY = 180;
-const ROUND_RESET_DELAY = 4000;
+// Each tile takes damage every 450 milliseconds
+// while a player stands on it.
+const DAMAGE_INTERVAL = 450;
+const BREAK_DELAY = 160;
+const RESET_DELAY = 4000;
 
-// =========================
-// GAME STATE
-// =========================
+const players = new Map();
 
-let players = {};
+const colors = [
+  "#3498db",
+  "#e74c3c",
+  "#9b59b6",
+  "#f39c12",
+  "#1abc9c",
+  "#e84393"
+];
+
 let tiles = [];
-let roundEnding = false;
-let roundNumber = 1;
+let round = 1;
+let phase = "waiting";
+let endAt = 0;
 
-// =========================
-// CREATE PLATFORMS
-// =========================
+function buildTiles() {
+  tiles = LEVELS.flatMap((y, layer) =>
+    Array.from({ length: COLS }, (_, col) => ({
+      id: `${layer}-${col}`,
+      layer,
+      x: START_X + col * TILE,
+      y,
+      width: TILE,
+      height: 24,
+      damage: 0,
+      broken: false,
+      breakAt: 0,
+      lastDamageAt: 0
+    }))
+  );
+}
 
-function createTiles() {
-  tiles = [];
+function spawn(p) {
+  p.x = START_X + 200 + Math.random() * 360;
+  p.y = LEVELS[0] - PH;
+  p.vx = 0;
+  p.vy = 0;
+  p.alive = true;
+  p.onGround = true;
+  p.left = false;
+  p.right = false;
+  p.jumpRequested = false;
+}
 
-  for (let layer = 0; layer < LAYERS.length; layer++) {
-    for (let col = 0; col < TILES_ACROSS; col++) {
-      tiles.push({
-        id: `${layer}-${col}`,
-        layer,
-        col,
-        x: PLATFORM_X + col * TILE_SIZE,
-        y: LAYERS[layer].y,
-        width: TILE_SIZE,
-        height: PLATFORM_HEIGHT,
-        damage: 0,
-        broken: false,
-        breakAt: null
-      });
-    }
+function activePlayers() {
+  return [...players.values()].filter(p => p.inRound);
+}
+
+function beginRound() {
+  buildTiles();
+  round++;
+  phase = "playing";
+
+  for (const p of players.values()) {
+    p.inRound = true;
+    spawn(p);
+  }
+
+  io.emit("newRound", { round });
+}
+
+function finishRound() {
+  if (phase !== "playing") return;
+
+  phase = "ending";
+  endAt = Date.now() + RESET_DELAY;
+
+  const alive = activePlayers().filter(p => p.alive);
+
+  io.emit("roundOver", {
+    winnerId: alive.length === 1 ? alive[0].id : null
+  });
+}
+
+function checkEnd() {
+  if (phase !== "playing") return;
+
+  const participants = activePlayers();
+  const alive = participants.filter(p => p.alive);
+
+  if (
+    participants.length === 0 ||
+    alive.length === 0 ||
+    (participants.length > 1 && alive.length <= 1)
+  ) {
+    finishRound();
   }
 }
 
-createTiles();
+function damage(tile, now) {
+  if (tile.broken || tile.breakAt) return;
 
-// =========================
-// PLAYERS
-// =========================
-
-function randomPlayerColor() {
-  const colors = [
-    "#3498db",
-    "#e74c3c",
-    "#2ecc71",
-    "#9b59b6",
-    "#f39c12",
-    "#1abc9c",
-    "#e84393",
-    "#00cec9"
-  ];
-
-  return colors[Math.floor(Math.random() * colors.length)];
-}
-
-function createPlayer(id) {
-  return {
-    id,
-    x:
-      PLATFORM_X +
-      PLATFORM_WIDTH / 2 -
-      PLAYER_WIDTH / 2 +
-      (Math.random() * 200 - 100),
-
-    y: LAYERS[0].y - PLAYER_HEIGHT - 10,
-
-    vx: 0,
-    vy: 0,
-
-    width: PLAYER_WIDTH,
-    height: PLAYER_HEIGHT,
-
-    left: false,
-    right: false,
-
-    alive: true,
-    onGround: false,
-
-    color: randomPlayerColor(),
-
-    lastTile: null
-  };
-}
-
-// =========================
-// CONNECTIONS
-// =========================
-
-io.on("connection", (socket) => {
-  console.log("Player connected:", socket.id);
-
-  players[socket.id] = createPlayer(socket.id);
-
-  socket.emit("init", {
-    id: socket.id,
-    roundNumber
-  });
-
-  socket.on("input", (input) => {
-    const player = players[socket.id];
-
-    if (!player || !player.alive) return;
-
-    player.left = !!input.left;
-    player.right = !!input.right;
-
-    if (input.jump && player.onGround) {
-      player.vy = -JUMP_SPEED;
-      player.onGround = false;
-    }
-  });
-
-  socket.on("disconnect", () => {
-    delete players[socket.id];
-    checkForWinner();
-  });
-});
-
-// =========================
-// DAMAGE TILES
-// =========================
-
-function damageTile(tile, player) {
-  if (!tile || tile.broken) return;
-
-  if (player.lastTile === tile.id) {
+  if (now - tile.lastDamageAt < DAMAGE_INTERVAL) {
     return;
   }
 
-  player.lastTile = tile.id;
-
+  tile.lastDamageAt = now;
   tile.damage++;
 
   if (tile.damage >= 3) {
     tile.damage = 3;
-
-    if (!tile.breakAt) {
-      tile.breakAt = Date.now() + TILE_BREAK_DELAY;
-    }
+    tile.breakAt = now + BREAK_DELAY;
   }
 }
 
-// =========================
-// LANDING COLLISION
-// =========================
+function updatePlayer(p, dt, now) {
+  if (!p.inRound || !p.alive) return;
 
-function findLandingTile(player, previousBottom) {
-  const playerBottom = player.y + player.height;
+  p.vx = (Number(p.right) - Number(p.left)) * SPEED;
 
-  let landingTile = null;
+  if (p.jumpRequested && p.onGround) {
+    p.vy = -JUMP;
+    p.onGround = false;
+  }
 
-  for (const tile of tiles) {
-    if (tile.broken) continue;
+  p.jumpRequested = false;
 
-    const horizontalOverlap =
-      player.x + player.width > tile.x &&
-      player.x < tile.x + tile.width;
+  p.x = Math.max(
+    0,
+    Math.min(WIDTH - PW, p.x + p.vx * dt)
+  );
 
-    const crossedPlatform =
-      previousBottom <= tile.y &&
-      playerBottom >= tile.y;
+  const previousBottom = p.y + PH;
 
-    if (
-      horizontalOverlap &&
-      crossedPlatform &&
-      player.vy >= 0
-    ) {
-      if (!landingTile || tile.y < landingTile.y) {
-        landingTile = tile;
+  p.vy += GRAVITY * dt;
+  p.y += p.vy * dt;
+
+  const bottom = p.y + PH;
+  let ground = null;
+
+  if (p.vy >= 0) {
+    for (const tile of tiles) {
+      if (tile.broken) continue;
+
+      if (
+        p.x + PW <= tile.x ||
+        p.x >= tile.x + TILE
+      ) {
+        continue;
+      }
+
+      if (
+        previousBottom <= tile.y + 2 &&
+        bottom >= tile.y &&
+        (!ground || tile.y < ground.y)
+      ) {
+        ground = tile;
       }
     }
   }
 
-  return landingTile;
-}
-
-// =========================
-// UPDATE PLAYER
-// =========================
-
-function updatePlayer(player, dt) {
-  if (!player.alive) return;
-
-  player.vx = 0;
-
-  if (player.left) {
-    player.vx = -MOVE_SPEED;
-  }
-
-  if (player.right) {
-    player.vx = MOVE_SPEED;
-  }
-
-  player.x += player.vx * dt;
-
-  const previousBottom = player.y + player.height;
-
-  player.vy += GRAVITY * dt;
-  player.y += player.vy * dt;
-
-  player.onGround = false;
-
-  const landingTile = findLandingTile(
-    player,
-    previousBottom
-  );
-
-  if (landingTile) {
-    player.y = landingTile.y - player.height;
-
-    player.vy = 0;
-    player.onGround = true;
-
-    damageTile(landingTile, player);
+  if (ground) {
+    p.y = ground.y - PH;
+    p.vy = 0;
+    p.onGround = true;
   } else {
-    const feetX = player.x + player.width / 2;
-    const feetY = player.y + player.height + 2;
+    p.onGround = false;
+  }
 
-    let stillAboveLastTile = false;
+  // Damage tiles even while standing completely still.
+  if (p.onGround) {
+    const feet = tiles.filter(t =>
+      !t.broken &&
+      t.y === ground.y &&
+      p.x + PW > t.x &&
+      p.x < t.x + TILE
+    );
 
-    if (player.lastTile) {
-      const oldTile = tiles.find(
-        (tile) => tile.id === player.lastTile
-      );
-
-      if (oldTile && !oldTile.broken) {
-        if (
-          feetX >= oldTile.x &&
-          feetX <= oldTile.x + oldTile.width &&
-          Math.abs(feetY - oldTile.y) < 15
-        ) {
-          stillAboveLastTile = true;
-        }
-      }
-    }
-
-    if (!stillAboveLastTile) {
-      player.lastTile = null;
+    for (const tile of feet) {
+      damage(tile, now);
     }
   }
 
-  if (player.x < 0) {
-    player.x = 0;
-  }
-
-  if (player.x + player.width > WORLD_WIDTH) {
-    player.x = WORLD_WIDTH - player.width;
-  }
-
-  if (player.y > WORLD_HEIGHT + 100) {
-    player.alive = false;
-    player.left = false;
-    player.right = false;
-
-    checkForWinner();
+  if (p.y > HEIGHT + 100) {
+    p.alive = false;
+    checkEnd();
   }
 }
 
-// =========================
-// BREAK TILES
-// =========================
+buildTiles();
 
-function updateTiles() {
-  const now = Date.now();
+io.on("connection", socket => {
+  const p = {
+    id: socket.id,
+    color: colors[
+      Math.floor(Math.random() * colors.length)
+    ],
+    inRound: false,
+    alive: false,
+    x: 0,
+    y: 0,
+    vx: 0,
+    vy: 0,
+    left: false,
+    right: false,
+    onGround: false,
+    jumpRequested: false
+  };
 
-  for (const tile of tiles) {
-    if (tile.breakAt && now >= tile.breakAt) {
-      tile.broken = true;
-      tile.breakAt = null;
-    }
-  }
-}
+  players.set(socket.id, p);
 
-// =========================
-// CHECK WINNER
-// =========================
-
-function checkForWinner() {
-  if (roundEnding) return;
-
-  const connectedPlayers = Object.values(players);
-
-  if (connectedPlayers.length === 0) {
-    return;
-  }
-
-  const alivePlayers = connectedPlayers.filter(
-    (player) => player.alive
-  );
-
-  if (
-    connectedPlayers.length > 1 &&
-    alivePlayers.length <= 1
-  ) {
-    roundEnding = true;
-
-    let winnerId = null;
-
-    if (alivePlayers.length === 1) {
-      winnerId = alivePlayers[0].id;
-    }
-
-    io.emit("roundOver", {
-      winnerId
-    });
-
-    setTimeout(resetRound, ROUND_RESET_DELAY);
+  // Only the first visitor starts an empty game.
+  // Everyone joining afterward must wait.
+  if (phase === "waiting") {
+    phase = "playing";
+    p.inRound = true;
+    spawn(p);
   }
 
-  // Allows you to test the game by yourself.
-  if (
-    connectedPlayers.length === 1 &&
-    alivePlayers.length === 0
-  ) {
-    roundEnding = true;
-
-    io.emit("roundOver", {
-      winnerId: null
-    });
-
-    setTimeout(resetRound, 2500);
-  }
-}
-
-// =========================
-// RESET ROUND
-// =========================
-
-function resetRound() {
-  createTiles();
-
-  roundNumber++;
-
-  for (const id in players) {
-    const oldColor = players[id].color;
-
-    players[id] = createPlayer(id);
-
-    players[id].color = oldColor;
-  }
-
-  roundEnding = false;
-
-  io.emit("newRound", {
-    roundNumber
+  socket.emit("init", {
+    id: socket.id,
+    round,
+    spectator: !p.inRound
   });
-}
 
-// =========================
-// GAME LOOP
-// =========================
+  socket.on("input", data => {
+    if (
+      !p.inRound ||
+      !p.alive ||
+      phase !== "playing" ||
+      !data ||
+      typeof data !== "object"
+    ) {
+      return;
+    }
 
-let lastUpdate = Date.now();
+    p.left = data.left === true;
+    p.right = data.right === true;
+
+    if (data.jump === true) {
+      p.jumpRequested = true;
+    }
+  });
+
+  socket.on("disconnect", () => {
+    players.delete(socket.id);
+    checkEnd();
+  });
+});
+
+let last = Date.now();
 
 setInterval(() => {
   const now = Date.now();
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
 
-  let dt = (now - lastUpdate) / 1000;
-  lastUpdate = now;
+  if (phase === "playing") {
+    for (const tile of tiles) {
+      if (tile.breakAt && now >= tile.breakAt) {
+        tile.broken = true;
+        tile.breakAt = 0;
+      }
+    }
 
-  if (dt > 0.05) {
-    dt = 0.05;
-  }
+    for (const p of players.values()) {
+      updatePlayer(p, dt, now);
+    }
 
-  updateTiles();
-
-  for (const id in players) {
-    updatePlayer(players[id], dt);
+    checkEnd();
+  } else if (phase === "ending" && now >= endAt) {
+    beginRound();
   }
 
   io.emit("state", {
-    players,
-    tiles,
-    roundNumber,
-    roundEnding
+    round,
+    phase,
+    tiles: tiles.map(t => ({
+      id: t.id,
+      x: t.x,
+      y: t.y,
+      width: t.width,
+      height: t.height,
+      damage: t.damage,
+      broken: t.broken
+    })),
+    players: Object.fromEntries(
+      [...players].map(([id, p]) => [
+        id,
+        {
+          id,
+          x: p.x,
+          y: p.y,
+          width: PW,
+          height: PH,
+          color: p.color,
+          alive: p.alive,
+          inRound: p.inRound
+        }
+      ])
+    )
   });
 }, 1000 / 30);
-
-// =========================
-// START SERVER
-// =========================
 
 server.listen(PORT, () => {
   console.log(
