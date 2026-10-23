@@ -12,6 +12,7 @@ app.use(express.static(path.join(__dirname, "public")));
 
 const PORT = process.env.PORT || 3000;
 
+// GAME SETTINGS
 const WIDTH = 1000;
 const HEIGHT = 760;
 const TILE = 40;
@@ -25,8 +26,6 @@ const SPEED = 260;
 const JUMP = 510;
 const GRAVITY = 1450;
 
-// Each tile takes damage every 450 milliseconds
-// while a player stands on it.
 const DAMAGE_INTERVAL = 450;
 const BREAK_DELAY = 160;
 const RESET_DELAY = 4000;
@@ -47,6 +46,7 @@ let round = 1;
 let phase = "waiting";
 let endAt = 0;
 
+// CREATE TILES
 function buildTiles() {
   tiles = LEVELS.flatMap((y, layer) =>
     Array.from({ length: COLS }, (_, col) => ({
@@ -64,6 +64,7 @@ function buildTiles() {
   );
 }
 
+// SPAWN PLAYER
 function spawn(p) {
   p.x = START_X + 200 + Math.random() * 360;
   p.y = LEVELS[0] - PH;
@@ -73,13 +74,14 @@ function spawn(p) {
   p.onGround = true;
   p.left = false;
   p.right = false;
-  p.jumpRequested = false;
+  p.jumpHeld = false;
 }
 
 function activePlayers() {
   return [...players.values()].filter(p => p.inRound);
 }
 
+// START NEW ROUND
 function beginRound() {
   buildTiles();
   round++;
@@ -93,6 +95,7 @@ function beginRound() {
   io.emit("newRound", { round });
 }
 
+// END ROUND
 function finishRound() {
   if (phase !== "playing") return;
 
@@ -106,6 +109,7 @@ function finishRound() {
   });
 }
 
+// CHECK WINNER
 function checkEnd() {
   if (phase !== "playing") return;
 
@@ -121,6 +125,7 @@ function checkEnd() {
   }
 }
 
+// DAMAGE TILES
 function damage(tile, now) {
   if (tile.broken || tile.breakAt) return;
 
@@ -137,31 +142,36 @@ function damage(tile, now) {
   }
 }
 
+// UPDATE PLAYER
 function updatePlayer(p, dt, now) {
   if (!p.inRound || !p.alive) return;
 
+  // Horizontal movement
   p.vx = (Number(p.right) - Number(p.left)) * SPEED;
-
-  if (p.jumpRequested && p.onGround) {
-    p.vy = -JUMP;
-    p.onGround = false;
-  }
-
-  p.jumpRequested = false;
 
   p.x = Math.max(
     0,
     Math.min(WIDTH - PW, p.x + p.vx * dt)
   );
 
+  // AUTOMATIC JUMP
+  // Holding jump makes the player jump again
+  // whenever they are on the ground.
+  if (p.jumpHeld && p.onGround) {
+    p.vy = -JUMP;
+    p.onGround = false;
+  }
+
   const previousBottom = p.y + PH;
 
+  // Gravity
   p.vy += GRAVITY * dt;
   p.y += p.vy * dt;
 
   const bottom = p.y + PH;
   let ground = null;
 
+  // Platform collision
   if (p.vy >= 0) {
     for (const tile of tiles) {
       if (tile.broken) continue;
@@ -191,8 +201,8 @@ function updatePlayer(p, dt, now) {
     p.onGround = false;
   }
 
-  // Damage tiles even while standing completely still.
-  if (p.onGround) {
+  // Damage tiles while standing on them
+  if (p.onGround && ground) {
     const feet = tiles.filter(t =>
       !t.broken &&
       t.y === ground.y &&
@@ -205,14 +215,21 @@ function updatePlayer(p, dt, now) {
     }
   }
 
+  // Death below bottom layer
   if (p.y > HEIGHT + 100) {
     p.alive = false;
+    p.left = false;
+    p.right = false;
+    p.jumpHeld = false;
+
     checkEnd();
   }
 }
 
+// CREATE FIRST ARENA
 buildTiles();
 
+// MULTIPLAYER CONNECTIONS
 io.on("connection", socket => {
   const p = {
     id: socket.id,
@@ -228,13 +245,13 @@ io.on("connection", socket => {
     left: false,
     right: false,
     onGround: false,
-    jumpRequested: false
+    jumpHeld: false
   };
 
   players.set(socket.id, p);
 
-  // Only the first visitor starts an empty game.
-  // Everyone joining afterward must wait.
+  // Only first visitor starts an empty game.
+  // Anyone else waits until next round.
   if (phase === "waiting") {
     phase = "playing";
     p.inRound = true;
@@ -247,6 +264,7 @@ io.on("connection", socket => {
     spectator: !p.inRound
   });
 
+  // PLAYER CONTROLS
   socket.on("input", data => {
     if (
       !p.inRound ||
@@ -261,9 +279,8 @@ io.on("connection", socket => {
     p.left = data.left === true;
     p.right = data.right === true;
 
-    if (data.jump === true) {
-      p.jumpRequested = true;
-    }
+    // Store whether jump is being held.
+    p.jumpHeld = data.jump === true;
   });
 
   socket.on("disconnect", () => {
@@ -272,6 +289,7 @@ io.on("connection", socket => {
   });
 });
 
+// MAIN GAME LOOP
 let last = Date.now();
 
 setInterval(() => {
@@ -280,6 +298,7 @@ setInterval(() => {
   last = now;
 
   if (phase === "playing") {
+    // Break damaged tiles
     for (const tile of tiles) {
       if (tile.breakAt && now >= tile.breakAt) {
         tile.broken = true;
@@ -287,6 +306,7 @@ setInterval(() => {
       }
     }
 
+    // Update players
     for (const p of players.values()) {
       updatePlayer(p, dt, now);
     }
@@ -296,6 +316,7 @@ setInterval(() => {
     beginRound();
   }
 
+  // Send synchronized game state
   io.emit("state", {
     round,
     phase,
@@ -326,6 +347,7 @@ setInterval(() => {
   });
 }, 1000 / 30);
 
+// START SERVER
 server.listen(PORT, () => {
   console.log(
     `Bob's Falling Platforms running on port ${PORT}`
