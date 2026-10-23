@@ -2,759 +2,405 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
+<meta charset="UTF-8">
+<meta name="viewport"
+      content="width=device-width, initial-scale=1">
+<title>Bob's Falling Platforms</title>
 
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
-  >
+<style>
+* { box-sizing: border-box; }
 
-  <title>Bob's Falling Platforms</title>
+body {
+  margin: 0;
+  background: #10131a;
+  color: white;
+  font-family: Arial, sans-serif;
+  text-align: center;
+}
 
-  <style>
-    * {
-      box-sizing: border-box;
-    }
+header {
+  padding: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 1000px;
+  margin: auto;
+}
 
-    html,
-    body {
-      margin: 0;
-      padding: 0;
-      width: 100%;
-      min-height: 100%;
-      background: #10131a;
-      color: white;
-      font-family: Arial, Helvetica, sans-serif;
-    }
+h2 { margin: 0; font-size: 22px; }
 
-    body {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-    }
+#status { color: #ddd; }
 
-    #topbar {
-      width: 100%;
-      max-width: 1100px;
-      padding: 12px 18px;
+#gameArea {
+  position: relative;
+  width: min(100%, 1000px);
+  margin: auto;
+}
 
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 15px;
-    }
+canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 2px solid #555;
+  border-radius: 8px;
+  background: #172131;
+}
 
-    #title {
-      font-size: 22px;
-      font-weight: bold;
-    }
+#overlay {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,.45);
+  pointer-events: none;
+}
 
-    #status {
-      font-size: 16px;
-      color: #d7d7d7;
-    }
+#overlayText {
+  padding: 20px 35px;
+  background: rgba(0,0,0,.85);
+  border-radius: 12px;
+  font-size: clamp(18px, 4vw, 32px);
+  font-weight: bold;
+}
 
-    #gameWrap {
-      width: min(100%, 1100px);
-
-      display: flex;
-      justify-content: center;
-
-      padding: 0 10px 15px;
-    }
-
-    canvas {
-      width: 100%;
-      height: auto;
-
-      max-width: 1000px;
-
-      background: #172131;
-
-      border: 3px solid #444;
-      border-radius: 8px;
-
-      display: block;
-    }
-
-    #instructions {
-      width: 100%;
-      max-width: 1000px;
-
-      padding: 0 15px 20px;
-
-      color: #bbb;
-
-      text-align: center;
-
-      font-size: 14px;
-    }
-
-    #message {
-      position: fixed;
-
-      left: 50%;
-      top: 22%;
-
-      transform: translateX(-50%);
-
-      background: rgba(0, 0, 0, 0.82);
-
-      padding: 18px 28px;
-
-      border-radius: 12px;
-
-      font-size: 30px;
-      font-weight: bold;
-
-      text-align: center;
-
-      display: none;
-
-      z-index: 10;
-
-      pointer-events: none;
-    }
-  </style>
+#instructions {
+  padding: 15px;
+  color: #bbb;
+  font-size: 14px;
+}
+</style>
 </head>
 
 <body>
 
-  <div id="topbar">
+<header>
+  <h2>Bob's Falling Platforms</h2>
+  <div id="status">Connecting...</div>
+</header>
 
-    <div id="title">
-      Bob's Falling Platforms
-    </div>
-
-    <div id="status">
-      Connecting...
-    </div>
-
+<div id="gameArea">
+  <canvas id="game" width="1000" height="760"></canvas>
+  <div id="overlay">
+    <div id="overlayText"></div>
   </div>
+</div>
 
-  <div id="gameWrap">
+<div id="instructions">
+  A / D or Arrow Keys = Move
+  • W / Up / Space = Jump
+  • Tiles break after 3 damage stages
+</div>
 
-    <canvas
-      id="game"
-      width="1000"
-      height="760"
-    ></canvas>
+<script src="/socket.io/socket.io.js"></script>
 
-  </div>
+<script>
+const socket = io();
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const status = document.getElementById("status");
+const overlay = document.getElementById("overlay");
+const overlayText = document.getElementById("overlayText");
 
-  <div id="instructions">
+let myId = null;
+let players = {};
+let tiles = [];
+let round = 1;
+let phase = "waiting";
+let roundMessage = "";
 
-    WASD / Arrow Keys = Move
+const keys = {
+  left: false,
+  right: false,
+  jump: false
+};
 
-    &nbsp; • &nbsp;
+let jumpSent = false;
 
-    W / Up / Space = Jump
+socket.on("connect", () => {
+  status.textContent = "Connected";
+});
 
-    &nbsp; • &nbsp;
+socket.on("disconnect", () => {
+  status.textContent = "Disconnected";
+  showOverlay("Disconnected — reconnecting...");
+});
 
-    Tiles break after 3 touches
+socket.on("init", data => {
+  myId = data.id;
+  round = data.round;
+  roundMessage = "";
+  updateOverlay();
+});
 
-  </div>
+socket.on("state", data => {
+  players = data.players;
+  tiles = data.tiles;
+  round = data.round;
+  phase = data.phase;
 
-  <div id="message"></div>
+  const count = Object.keys(players).length;
+  status.textContent =
+    `Round ${round} • Players: ${count}`;
 
-  <script src="/socket.io/socket.io.js"></script>
+  updateOverlay();
+});
 
-  <script>
+socket.on("roundOver", data => {
+  if (data.winnerId === myId) {
+    roundMessage = "YOU WIN!";
+  } else if (data.winnerId) {
+    roundMessage = "ROUND OVER!";
+  } else {
+    roundMessage = "ROUND OVER!";
+  }
 
-    const socket = io();
+  updateOverlay();
+});
 
-    const canvas =
-      document.getElementById("game");
+socket.on("newRound", data => {
+  round = data.round;
+  roundMessage = "";
+  updateOverlay();
+});
 
-    const ctx =
-      canvas.getContext("2d");
+function showOverlay(message) {
+  overlay.style.display = "flex";
+  overlayText.textContent = message;
+}
 
-    const statusElement =
-      document.getElementById("status");
+function hideOverlay() {
+  overlay.style.display = "none";
+}
 
-    const messageElement =
-      document.getElementById("message");
+function updateOverlay() {
+  if (!socket.connected) {
+    showOverlay("Disconnected — reconnecting...");
+    return;
+  }
 
-    let myId = null;
+  if (!myId) {
+    showOverlay("Connecting...");
+    return;
+  }
 
-    let players = {};
-    let tiles = [];
+  const me = players[myId];
 
-    let roundNumber = 1;
+  if (!me || !me.inRound) {
+    showOverlay("SPECTATING — WAIT FOR NEXT ROUND");
+    return;
+  }
 
-    const keys = {
-      left: false,
-      right: false,
-      jump: false
-    };
+  if (phase === "ending") {
+    showOverlay(roundMessage || "ROUND OVER!");
+    return;
+  }
 
-    let jumpWasSent = false;
+  if (!me.alive) {
+    showOverlay("ELIMINATED — WAIT FOR NEXT ROUND");
+    return;
+  }
 
-    // =============================
-    // SOCKET
-    // =============================
+  hideOverlay();
+}
 
-    socket.on("connect", () => {
+window.addEventListener("keydown", e => {
+  const key = e.key.toLowerCase();
 
-      statusElement.textContent =
-        "Connected";
+  if (key === "a" || key === "arrowleft") {
+    keys.left = true;
+    e.preventDefault();
+  }
 
+  if (key === "d" || key === "arrowright") {
+    keys.right = true;
+    e.preventDefault();
+  }
+
+  if (
+    key === "w" ||
+    key === "arrowup" ||
+    e.code === "Space"
+  ) {
+    keys.jump = true;
+    e.preventDefault();
+  }
+});
+
+window.addEventListener("keyup", e => {
+  const key = e.key.toLowerCase();
+
+  if (key === "a" || key === "arrowleft") {
+    keys.left = false;
+  }
+
+  if (key === "d" || key === "arrowright") {
+    keys.right = false;
+  }
+
+  if (
+    key === "w" ||
+    key === "arrowup" ||
+    e.code === "Space"
+  ) {
+    keys.jump = false;
+    jumpSent = false;
+  }
+});
+
+window.addEventListener("blur", () => {
+  keys.left = false;
+  keys.right = false;
+  keys.jump = false;
+  jumpSent = false;
+});
+
+setInterval(() => {
+  let jump = false;
+
+  if (keys.jump && !jumpSent) {
+    jump = true;
+    jumpSent = true;
+  }
+
+  if (socket.connected) {
+    socket.emit("input", {
+      left: keys.left,
+      right: keys.right,
+      jump
     });
+  }
+}, 1000 / 30);
 
-    socket.on("disconnect", () => {
+function tileColor(damage) {
+  if (damage === 0) return "#41b883";
+  if (damage === 1) return "#f1c40f";
+  if (damage === 2) return "#e67e22";
+  return "#e74c3c";
+}
 
-      statusElement.textContent =
-        "Disconnected";
+function drawBackground() {
+  const gradient = ctx.createLinearGradient(
+    0, 0, 0, canvas.height
+  );
 
-    });
+  gradient.addColorStop(0, "#24344d");
+  gradient.addColorStop(1, "#10141d");
 
-    socket.on("init", (data) => {
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, 1000, 760);
+}
 
-      myId = data.id;
+function drawTiles() {
+  for (const tile of tiles) {
+    if (tile.broken) continue;
 
-      roundNumber =
-        data.roundNumber;
+    ctx.fillStyle = tileColor(tile.damage);
 
-    });
-
-    socket.on("state", (state) => {
-
-      players = state.players;
-
-      tiles = state.tiles;
-
-      roundNumber =
-        state.roundNumber;
-
-      updateStatus();
-
-    });
-
-    socket.on("roundOver", (data) => {
-
-      if (data.winnerId === myId) {
-
-        showMessage("YOU WIN!");
-
-      }
-      else if (data.winnerId) {
-
-        showMessage("ROUND OVER");
-
-      }
-      else {
-
-        showMessage("YOU FELL!");
-
-      }
-
-    });
-
-    socket.on("newRound", (data) => {
-
-      roundNumber =
-        data.roundNumber;
-
-      hideMessage();
-
-    });
-
-    // =============================
-    // CONTROLS
-    // =============================
-
-    window.addEventListener(
-      "keydown",
-      (event) => {
-
-        const key =
-          event.key.toLowerCase();
-
-        if (
-          key === "a" ||
-          event.key === "ArrowLeft"
-        ) {
-
-          keys.left = true;
-
-          event.preventDefault();
-
-        }
-
-        if (
-          key === "d" ||
-          event.key === "ArrowRight"
-        ) {
-
-          keys.right = true;
-
-          event.preventDefault();
-
-        }
-
-        if (
-          key === "w" ||
-          event.key === "ArrowUp" ||
-          event.code === "Space"
-        ) {
-
-          keys.jump = true;
-
-          event.preventDefault();
-
-        }
-
-      }
+    ctx.fillRect(
+      tile.x + 1,
+      tile.y,
+      tile.width - 2,
+      tile.height
     );
 
-    window.addEventListener(
-      "keyup",
-      (event) => {
+    ctx.fillStyle = "rgba(255,255,255,.2)";
+    ctx.fillRect(tile.x + 2, tile.y + 2, 36, 4);
 
-        const key =
-          event.key.toLowerCase();
-
-        if (
-          key === "a" ||
-          event.key === "ArrowLeft"
-        ) {
-
-          keys.left = false;
-
-        }
-
-        if (
-          key === "d" ||
-          event.key === "ArrowRight"
-        ) {
-
-          keys.right = false;
-
-        }
-
-        if (
-          key === "w" ||
-          event.key === "ArrowUp" ||
-          event.code === "Space"
-        ) {
-
-          keys.jump = false;
-
-          jumpWasSent = false;
-
-        }
-
-      }
+    ctx.strokeStyle = "#263238";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(
+      tile.x + 1,
+      tile.y,
+      tile.width - 2,
+      tile.height
     );
 
-    // =============================
-    // SEND CONTROLS
-    // =============================
-
-    setInterval(() => {
-
-      let jump = false;
-
-      if (
-        keys.jump &&
-        !jumpWasSent
-      ) {
-
-        jump = true;
-
-        jumpWasSent = true;
-
-      }
-
-      socket.emit(
-        "input",
-        {
-          left: keys.left,
-          right: keys.right,
-          jump
-        }
-      );
-
-    }, 1000 / 30);
-
-    // =============================
-    // STATUS
-    // =============================
-
-    function updateStatus() {
-
-      const playerCount =
-        Object.keys(players).length;
-
-      statusElement.textContent =
-        `Round ${roundNumber} • Players: ${playerCount}`;
-
-    }
-
-    // =============================
-    // MESSAGES
-    // =============================
-
-    function showMessage(text) {
-
-      messageElement.textContent =
-        text;
-
-      messageElement.style.display =
-        "block";
-
-    }
-
-    function hideMessage() {
-
-      messageElement.style.display =
-        "none";
-
-    }
-
-    // =============================
-    // TILE COLOR
-    // =============================
-
-    function getTileColor(tile) {
-
-      if (tile.damage === 0) {
-
-        return "#41b883";
-
-      }
-
-      if (tile.damage === 1) {
-
-        return "#f1c40f";
-
-      }
-
-      if (tile.damage === 2) {
-
-        return "#e67e22";
-
-      }
-
-      return "#e74c3c";
-
-    }
-
-    // =============================
-    // BACKGROUND
-    // =============================
-
-    function drawBackground() {
-
-      const gradient =
-        ctx.createLinearGradient(
-          0,
-          0,
-          0,
-          canvas.height
-        );
-
-      gradient.addColorStop(
-        0,
-        "#24344d"
-      );
-
-      gradient.addColorStop(
-        1,
-        "#10141d"
-      );
-
-      ctx.fillStyle = gradient;
-
-      ctx.fillRect(
-        0,
-        0,
-        canvas.width,
-        canvas.height
-      );
-
-    }
-
-    // =============================
-    // TILE
-    // =============================
-
-    function drawTile(tile) {
-
-      if (tile.broken) {
-        return;
-      }
-
-      ctx.fillStyle =
-        getTileColor(tile);
-
-      ctx.fillRect(
-        tile.x + 1,
-        tile.y,
-        tile.width - 2,
-        tile.height
-      );
-
-      ctx.fillStyle =
-        "rgba(255,255,255,0.18)";
-
-      ctx.fillRect(
-        tile.x + 2,
-        tile.y + 2,
-        tile.width - 4,
-        4
-      );
-
-      ctx.strokeStyle =
-        "rgba(0,0,0,0.35)";
-
-      ctx.lineWidth = 1;
-
-      ctx.strokeRect(
-        tile.x + 1,
-        tile.y,
-        tile.width - 2,
-        tile.height
-      );
-
-      if (tile.damage >= 2) {
-
-        ctx.strokeStyle =
-          "rgba(0,0,0,0.7)";
-
-        ctx.lineWidth = 2;
-
-        ctx.beginPath();
-
-        ctx.moveTo(
-          tile.x + 10,
-          tile.y + 2
-        );
-
-        ctx.lineTo(
-          tile.x + 18,
-          tile.y + 10
-        );
-
-        ctx.lineTo(
-          tile.x + 13,
-          tile.y + 18
-        );
-
-        ctx.stroke();
-
-      }
-
-    }
-
-    // =============================
-    // PLAYER
-    // =============================
-
-    function drawPlayer(player) {
-
-      if (!player.alive) {
-        return;
-      }
-
-      ctx.fillStyle =
-        player.color;
-
-      ctx.fillRect(
-        player.x,
-        player.y,
-        player.width,
-        player.height
-      );
-
-      // Eyes
-
-      const eyeY =
-        player.y + 10;
-
-      ctx.fillStyle =
-        "white";
-
-      ctx.fillRect(
-        player.x + 5,
-        eyeY,
-        7,
-        8
-      );
-
-      ctx.fillRect(
-        player.x + 17,
-        eyeY,
-        7,
-        8
-      );
-
-      // Pupils
-
-      ctx.fillStyle =
-        "#111";
-
-      ctx.fillRect(
-        player.x + 8,
-        eyeY + 3,
-        3,
-        4
-      );
-
-      ctx.fillRect(
-        player.x + 20,
-        eyeY + 3,
-        3,
-        4
-      );
-
-      // Outline
-
-      ctx.strokeStyle =
-        "#111";
-
+    if (tile.damage >= 2) {
+      ctx.strokeStyle = "#513322";
       ctx.lineWidth = 2;
-
-      ctx.strokeRect(
-        player.x,
-        player.y,
-        player.width,
-        player.height
-      );
-
-      // YOU label
-
-      if (player.id === myId) {
-
-        ctx.fillStyle =
-          "white";
-
-        ctx.font =
-          "bold 13px Arial";
-
-        ctx.textAlign =
-          "center";
-
-        ctx.fillText(
-          "YOU",
-          player.x +
-            player.width / 2,
-          player.y - 8
-        );
-
-      }
-
+      ctx.beginPath();
+      ctx.moveTo(tile.x + 10, tile.y + 2);
+      ctx.lineTo(tile.x + 20, tile.y + 12);
+      ctx.lineTo(tile.x + 15, tile.y + 22);
+      ctx.stroke();
     }
+  }
+}
 
-    // =============================
-    // LAYER LABELS
-    // =============================
+function drawPlayer(p) {
+  if (!p.alive || !p.inRound) return;
 
-    function drawLayerLabels() {
+  ctx.fillStyle = p.color;
+  ctx.fillRect(p.x, p.y, p.width, p.height);
 
-      const layers = [
+  ctx.strokeStyle = "#111";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(p.x, p.y, p.width, p.height);
 
-        {
-          y: 220,
-          text: "LAYER 1"
-        },
+  // Eyes
+  ctx.fillStyle = "white";
+  ctx.fillRect(p.x + 5, p.y + 10, 7, 8);
+  ctx.fillRect(p.x + 17, p.y + 10, 7, 8);
 
-        {
-          y: 430,
-          text: "LAYER 2"
-        },
+  // Pupils
+  ctx.fillStyle = "#111";
+  ctx.fillRect(p.x + 8, p.y + 13, 3, 4);
+  ctx.fillRect(p.x + 20, p.y + 13, 3, 4);
 
-        {
-          y: 640,
-          text: "FINAL LAYER"
-        }
+  if (p.id === myId) {
+    ctx.fillStyle = "white";
+    ctx.font = "bold 13px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText(
+      "YOU",
+      p.x + p.width / 2,
+      p.y - 10
+    );
+  }
+}
 
-      ];
+function drawLabels() {
+  const labels = [
+    { y: 220, name: "LAYER 1" },
+    { y: 430, name: "LAYER 2" },
+    { y: 640, name: "FINAL LAYER" }
+  ];
 
-      ctx.font =
-        "bold 15px Arial";
+  ctx.font = "bold 15px Arial";
+  ctx.textAlign = "right";
+  ctx.fillStyle = "rgba(255,255,255,.6)";
 
-      ctx.textAlign =
-        "right";
+  for (const label of labels) {
+    ctx.fillText(label.name, 92, label.y + 17);
+  }
+}
 
-      for (
-        const layer of layers
-      ) {
+function draw() {
+  drawBackground();
+  drawLabels();
+  drawTiles();
 
-        ctx.fillStyle =
-          "rgba(255,255,255,0.5)";
+  for (const id in players) {
+    drawPlayer(players[id]);
+  }
 
-        ctx.fillText(
-          layer.text,
-          92,
-          layer.y + 17
-        );
+  ctx.fillStyle = "rgba(231,76,60,.18)";
+  ctx.fillRect(0, 720, 1000, 40);
 
-      }
+  ctx.fillStyle = "white";
+  ctx.font = "bold 13px Arial";
+  ctx.textAlign = "center";
+  ctx.fillText(
+    "FALL BELOW THE FINAL PLATFORM = OUT",
+    500,
+    747
+  );
 
-    }
+  requestAnimationFrame(draw);
+}
 
-    // =============================
-    // DRAW GAME
-    // =============================
-
-    function draw() {
-
-      drawBackground();
-
-      drawLayerLabels();
-
-      for (
-        const tile of tiles
-      ) {
-
-        drawTile(tile);
-
-      }
-
-      for (
-        const id in players
-      ) {
-
-        drawPlayer(
-          players[id]
-        );
-
-      }
-
-      ctx.fillStyle =
-        "rgba(231,76,60,0.18)";
-
-      ctx.fillRect(
-        0,
-        720,
-        canvas.width,
-        40
-      );
-
-      ctx.fillStyle =
-        "rgba(255,255,255,0.55)";
-
-      ctx.font =
-        "bold 13px Arial";
-
-      ctx.textAlign =
-        "center";
-
-      ctx.fillText(
-        "FALL BELOW THE FINAL PLATFORM = OUT",
-        canvas.width / 2,
-        747
-      );
-
-      requestAnimationFrame(draw);
-
-    }
-
-    draw();
-
-  </script>
-
+draw();
+</script>
 </body>
 </html>
